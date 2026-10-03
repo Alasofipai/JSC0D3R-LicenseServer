@@ -1,5 +1,4 @@
 using Npgsql;
-using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,13 +22,11 @@ bool IsAdmin(HttpRequest req)
         && key == builder.Configuration["AdminKey"];
 }
 
-
 // ============================================================
 // INICIALIZAR BASE DE DATOS
 // ============================================================
 
 await EnsureDatabaseAsync();
-
 
 // ============================================================
 // VALIDAR LICENCIA
@@ -105,9 +102,11 @@ app.MapPost("/api/license/validate", async (LicenseCheck check) =>
         });
     }
 
-    // Primera activación: vincular HWID
+    // Primera activación: asociar HWID
     if (string.IsNullOrWhiteSpace(lic.Hwid))
     {
+        var now = DateTimeOffset.UtcNow;
+
         await using var update = new NpgsqlCommand("""
             UPDATE licenses
             SET hwid = @hwid,
@@ -116,13 +115,13 @@ app.MapPost("/api/license/validate", async (LicenseCheck check) =>
             """, conn);
 
         update.Parameters.AddWithValue("hwid", check.Hwid.Trim());
-        update.Parameters.AddWithValue("now", DateTimeOffset.UtcNow);
+        update.Parameters.AddWithValue("now", now);
         update.Parameters.AddWithValue("id", lic.Id);
 
         await update.ExecuteNonQueryAsync();
 
         lic.Hwid = check.Hwid.Trim();
-        lic.LastSeenAt = DateTimeOffset.UtcNow;
+        lic.LastSeenAt = now;
     }
     else if (!lic.Hwid.Equals(
         check.Hwid.Trim(),
@@ -137,25 +136,20 @@ app.MapPost("/api/license/validate", async (LicenseCheck check) =>
     }
     else
     {
+        var now = DateTimeOffset.UtcNow;
+
         await using var updateSeen = new NpgsqlCommand("""
             UPDATE licenses
             SET last_seen_at = @now
             WHERE id = @id
             """, conn);
 
-        updateSeen.Parameters.AddWithValue(
-            "now",
-            DateTimeOffset.UtcNow
-        );
-
-        updateSeen.Parameters.AddWithValue(
-            "id",
-            lic.Id
-        );
+        updateSeen.Parameters.AddWithValue("now", now);
+        updateSeen.Parameters.AddWithValue("id", lic.Id);
 
         await updateSeen.ExecuteNonQueryAsync();
 
-        lic.LastSeenAt = DateTimeOffset.UtcNow;
+        lic.LastSeenAt = now;
     }
 
     return Results.Ok(new
@@ -166,7 +160,6 @@ app.MapPost("/api/license/validate", async (LicenseCheck check) =>
         message = "OK"
     });
 });
-
 
 // ============================================================
 // LISTAR LICENCIAS
@@ -205,7 +198,6 @@ app.MapGet("/api/admin/licenses", async (HttpRequest req) =>
 
     return Results.Ok(list);
 });
-
 
 // ============================================================
 // CREAR LICENCIA
@@ -296,21 +288,13 @@ async (HttpRequest req, CreateLicense input) =>
             : item.ExpiresAt.Value
     );
 
-    cmd.Parameters.AddWithValue(
-        "created_at",
-        item.CreatedAt
-    );
-
-    cmd.Parameters.AddWithValue(
-        "last_seen_at",
-        DBNull.Value
-    );
+    cmd.Parameters.AddWithValue("created_at", item.CreatedAt);
+    cmd.Parameters.AddWithValue("last_seen_at", DBNull.Value);
 
     await cmd.ExecuteNonQueryAsync();
 
     return Results.Ok(item);
 });
-
 
 // ============================================================
 // MODIFICAR LICENCIA
@@ -381,20 +365,9 @@ async (
         WHERE id = @id
         """, conn);
 
-    update.Parameters.AddWithValue(
-        "customer",
-        item.Customer
-    );
-
-    update.Parameters.AddWithValue(
-        "hwid",
-        item.Hwid
-    );
-
-    update.Parameters.AddWithValue(
-        "active",
-        item.Active
-    );
+    update.Parameters.AddWithValue("customer", item.Customer);
+    update.Parameters.AddWithValue("hwid", item.Hwid);
+    update.Parameters.AddWithValue("active", item.Active);
 
     update.Parameters.AddWithValue(
         "expires_at",
@@ -403,16 +376,12 @@ async (
             : item.ExpiresAt.Value
     );
 
-    update.Parameters.AddWithValue(
-        "id",
-        item.Id
-    );
+    update.Parameters.AddWithValue("id", item.Id);
 
     await update.ExecuteNonQueryAsync();
 
     return Results.Ok(item);
 });
-
 
 // ============================================================
 // ELIMINAR LICENCIA
@@ -441,7 +410,6 @@ async (HttpRequest req, Guid id) =>
         : Results.NotFound();
 });
 
-
 // ============================================================
 // PANEL WEB
 // ============================================================
@@ -449,7 +417,6 @@ async (HttpRequest req, Guid id) =>
 app.MapFallbackToFile("index.html");
 
 app.Run();
-
 
 // ============================================================
 // CREAR TABLA AUTOMÁTICAMENTE
@@ -473,18 +440,15 @@ async Task EnsureDatabaseAsync()
             last_seen_at TIMESTAMPTZ NULL
         );
 
-        CREATE INDEX IF NOT EXISTS
-            idx_licenses_license_key_lower
+        CREATE INDEX IF NOT EXISTS idx_licenses_license_key_lower
         ON licenses (LOWER(license_key));
 
-        CREATE INDEX IF NOT EXISTS
-            idx_licenses_hwid
+        CREATE INDEX IF NOT EXISTS idx_licenses_hwid
         ON licenses (hwid);
         """, conn);
 
     await cmd.ExecuteNonQueryAsync();
 }
-
 
 // ============================================================
 // SOPORTAR DATABASE_URL DE RENDER
@@ -525,14 +489,12 @@ static string BuildPostgresConnectionString(string value)
         Username = username,
         Password = password,
         Database = database,
-        SSLMode = SslMode.Require,
-        TrustServerCertificate = true,
+        SslMode = SslMode.Require,
         Pooling = true
     };
 
     return cs.ConnectionString;
 }
-
 
 // ============================================================
 // LEER LICENCIA
@@ -540,6 +502,9 @@ static string BuildPostgresConnectionString(string value)
 
 static LicenseRecord ReadLicense(NpgsqlDataReader reader)
 {
+    var expiresAtIndex = reader.GetOrdinal("expires_at");
+    var lastSeenAtIndex = reader.GetOrdinal("last_seen_at");
+
     return new LicenseRecord
     {
         Id = reader.GetGuid(
@@ -562,28 +527,19 @@ static LicenseRecord ReadLicense(NpgsqlDataReader reader)
             reader.GetOrdinal("active")
         ),
 
-        ExpiresAt = reader.IsDBNull(
-            reader.GetOrdinal("expires_at")
-        )
+        ExpiresAt = reader.IsDBNull(expiresAtIndex)
             ? null
-            : reader.GetFieldValue<DateTimeOffset>(
-                reader.GetOrdinal("expires_at")
-            ),
+            : reader.GetFieldValue<DateTimeOffset>(expiresAtIndex),
 
         CreatedAt = reader.GetFieldValue<DateTimeOffset>(
             reader.GetOrdinal("created_at")
         ),
 
-        LastSeenAt = reader.IsDBNull(
-            reader.GetOrdinal("last_seen_at")
-        )
+        LastSeenAt = reader.IsDBNull(lastSeenAtIndex)
             ? null
-            : reader.GetFieldValue<DateTimeOffset>(
-                reader.GetOrdinal("last_seen_at")
-            )
+            : reader.GetFieldValue<DateTimeOffset>(lastSeenAtIndex)
     };
 }
-
 
 // ============================================================
 // GENERAR CLAVE
@@ -616,7 +572,6 @@ static string MakeKey()
             )
     );
 }
-
 
 // ============================================================
 // MODELOS
